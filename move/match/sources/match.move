@@ -8,15 +8,26 @@ module match::match {
     use sui::transfer;
     use sui::event;
 
-    // === Structs ===
-    public struct Match<phantom COIN> has key, store {
+    // === General Structs ===
+    public struct GameMatch<phantom COIN> has key, store {
         id: UID,
         maker: address,
         taker: address,
-        // status: 
+        status: MatchStatus,
         prize: Balance<SUI>
     }
 
+    // === PVP Structs ===
+
+    /// We can also call this an "order book"
+    public struct PVPMatchPool has key, store {
+        id: UID,
+        // matches: Bag,
+        matches: Table<address, Match> 
+        // IRVIN: Ask about what data structure to use
+    }
+
+    // === Tournament Structs ===
     public struct TournamentPool has key {
         id: UID,
         amount: Balance<SUI>
@@ -50,7 +61,14 @@ module match::match {
 
     /// Initialized called only once on module publish
     fun init(ctx: &mut TxContext) {
+        let id = id: object::new(ctx);
+        // let matches = table::new(ctx);
+        let matches = table::new<address, Match>(ctx);
 
+        let matchPool = PVPMatchPool {
+            id,
+            matches
+        }
     }
 
     /// Player joins PVP game
@@ -63,16 +81,48 @@ module match::match {
     ///         Join "random" match.
     ///         NOTE: match that player is joining already has a score.
     ///         QUESTION: Will score be hidden?
-    public fun join_pvp_game() {
-
+    fun join_pvp_game(
+        entry_fee: Coin<SUI>,
+        ctx: &mut: TxContext
+    ) {
+        // STEP 1: If there's a list of "OPEN" matches, match with a "random" one
+        if (table::length(&matchPool) != 0) {
+            // STEP 2: Join random match
+            join_match(entry_fee)
+        }
+        else {
+            // STEP 2: Create match
+            // IRVIN: Ask about how to call function internally
+            create_match(entry_fee);
+        }
     }
 
-    fun create_match(ctx: &mut TxContext) {
+    /// Create a match.
+    /// From the game's perspective, the player creating the match is called
+    /// a "Maker".
+    fun create_match(entry_fee: Coin<SUI>, ctx: &mut TxContext) {
+        GameMatch {
+            id: object::new(ctx),
+            maker: tx_context,
+            // taker: address,
+            status: MatchStatus.OPEN,
+            prize: coin::into_balance(entry_fee)
+        }
         event::emit(TimeEvent { timestamp_ms: clock.timestamp_ms() });
     }
 
-    fun join_match() {
+    /// 
+    fun join_match(
+        entry_fee: Coin<SUI>,
+        ctx: &mut: TxContext
+    ) {
+        let player = tx_context::sender(ctx);
+        // IRVIN: Create VRF
+        // Select random entry from table
+        // Insert match
+    }
 
+    public fun view_match_score() {
     }
 
     /// Deposit money into liquidity pool
@@ -80,12 +130,8 @@ module match::match {
         balance::join(&mut pool.amount, coin:into_balance(deposit));
     }
 
-    public fun view_score() {
-
-    }
-
-    public fun claim_prize() {
-
+    public fun claim_prize(match: &mut Match, ctx: &mut TxContext) {
+        assert(match.status == MatchStatus.RESOLVED);
     }
 
     public fun mint_nft(payment: Coin<SUI>, ctx: &mut TxContext): NFT {
