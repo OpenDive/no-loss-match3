@@ -1,18 +1,10 @@
 module match_game::match_game {
     use sui::sui::SUI;
-    use sui::tx_context::{TxContext};
-    use sui::object::{Self, ID, UID};
     use sui::coin::{Self, Coin};
-    use sui::bag::{Self};
-    use sui::table::{Table, Self};
     use sui::balance::{Self, Balance};
     use sui::random::{Random, new_generator};
-    use sui::clock;
     use sui::clock::Clock;
-    use sui::transfer;
     use sui::event;
-    use sui::ecvrf;
-    use std::vector;
 
     // ====== Errors ======
     // Not enough funds for entry fees
@@ -33,8 +25,17 @@ module match_game::match_game {
         maker: address,
         taker: Option<address>,
         status: MatchStatus,
-         prize: Balance<SUI>
+        prize: Balance<SUI>
     }
+
+    /// A dummy NFT to represent the flashloan functionality
+    public struct NFT has key{
+        id: UID,
+        match_id: ID,
+        // entry_fee: Balance<SUI>,
+        entry_fee: u64
+    }
+
 
     // ====== PVP Structs ======
 
@@ -46,16 +47,16 @@ module match_game::match_game {
     }
 
     // === Tournament Structs ===
-    public struct TournamentPool has key {
-        id: UID,
-        amount: Balance<SUI>
-    }
+    // public struct TournamentPool has key {
+    //     id: UID,
+    //     amount: Balance<SUI>
+    // }
 
-    public struct EntryTicketNFT has key {
-        id: UID,
-        entry_fee: Balance<SUI>,
-        timestamp_ms: u64 
-    }
+    // public struct EntryTicketNFT has key {
+    //     id: UID,
+    //     entry_fee: Balance<SUI>,
+    //     timestamp_ms: u64 
+    // }
 
     public enum MatchStatus has store, copy, drop {
         OPEN, // Available (waiting for a Taker)
@@ -83,9 +84,6 @@ module match_game::match_game {
         maker: address,
         timestamp_ms: u64
     }
-    // public struct MatchCreatedEvent has copy, drop, store {
-    //     gameMatch: GameMatch
-    // }
 
     // ====== Functions ======
 
@@ -114,22 +112,23 @@ module match_game::match_game {
     //         Join "random" match.
     //         NOTE: match that player is joining already has a score.
     //         QUESTION: Will score be hidden?
-    public entry fun join_pvp_game(
+    #[allow(lint(public_random))] // IRVIN: Fix / Look into this later
+    public fun join_pvp_game(
         entry_fee: Coin<SUI>,
         match_pool: &mut PVPMatchPool,
         r: &Random,
         clock: &Clock,
         ctx: &mut TxContext
-    ) {
+    ) : NFT {
         // STEP 1: If there's a list of "OPEN" matches, match with a "random" one
         if (vector::length(&match_pool.matches) > 0) {
             // STEP 2: Join random match
-            join_match(entry_fee, match_pool, r, ctx);
+            join_match(entry_fee, match_pool, r, ctx)
         }
         else {
             // STEP 2: Create match
             // IRVIN: Ask about how to call function internally
-            create_match(entry_fee, match_pool, clock, ctx);
+            create_match(entry_fee, match_pool, clock, ctx)
         }
     }
 
@@ -141,9 +140,10 @@ module match_game::match_game {
         match_pool: &mut PVPMatchPool,
         clock: &Clock,
         ctx: &mut TxContext
-    ) {
+    ) : NFT {
         let maker = tx_context::sender(ctx);
         let id = object::new(ctx);
+        let entry_fee_val = entry_fee.value();
         let gameMatch: GameMatch = GameMatch {
             id: id,
             maker: maker,
@@ -158,21 +158,32 @@ module match_game::match_game {
             maker,
             timestamp_ms,
         };
+
+        // Issue NFT that represent
+        let nft = NFT {
+            id: object::new(ctx),
+            match_id: gameMatch.id.uid_to_inner(),
+            // entry_fee: coin::into_balance(entry_fee)
+            entry_fee: entry_fee_val
+        };
+
         match_pool.matches.push_back(gameMatch);
-        event::emit(matchCreatedEvent)
+        event::emit(matchCreatedEvent);
+        nft
     }
 
-    // 
+    // Join a random match
     fun join_match(
         entry_fee: Coin<SUI>,
         match_pool: &mut PVPMatchPool,
         r: &Random,
         ctx: &mut TxContext
-    ) {
+    ) : NFT {
         // assert!(entry_fee <= balance::value(&pool.amount), ELoanAmountExceedPool);
 
         let player = tx_context::sender(ctx);
         let matches_len = vector::length(&match_pool.matches);
+        let entry_fee_val = entry_fee.value();
 
         if(matches_len == 1) {
             let matchPaired = &mut match_pool.matches[0];
@@ -180,6 +191,13 @@ module match_game::match_game {
             matchPaired.status = MatchStatus::IN_PROGRESS;
             // matchPaired.prize = coin::into_balance(entry_fee);
             matchPaired.prize.join(entry_fee.into_balance());
+
+            NFT {
+                id: object::new(ctx),
+                match_id: matchPaired.id.uid_to_inner(),
+                // entry_fee: coin::into_balance(entry_fee)
+                entry_fee: entry_fee_val
+            }
         }
         else
         {
@@ -190,13 +208,22 @@ module match_game::match_game {
             matchPaired.status = MatchStatus::IN_PROGRESS;
 
             balance::join(&mut matchPaired.prize, coin::into_balance(entry_fee));
+
+            NFT {
+                id: object::new(ctx),
+                match_id: matchPaired.id.uid_to_inner(),
+                // entry_fee: coin::into_balance(entry_fee)
+                entry_fee: entry_fee_val
+            }
         }
     }
 
-    // public submit_match_result(
-
+    // public fun submit_match_result(
+    //     gameMatch: &mut GameMatch,
+    //     match_pool: &mut PVPMatchPool,
+    //     ctx: &mut TxContext
     // ) {
-
+    //     let matchPaired = mat
     // }
 
     // ====== Randomness ======
