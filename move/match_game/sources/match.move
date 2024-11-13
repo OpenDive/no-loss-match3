@@ -1,37 +1,34 @@
 module match_game::match_game {
     use sui::sui::SUI;
+    use sui::table::{Self, Table};
     use sui::coin::{Self, Coin};
     use sui::balance::{Self, Balance};
     use sui::random::{Random, new_generator};
     use sui::clock::Clock;
     use sui::event;
-
-    // ====== Errors ======
-    // Not enough funds for entry fees
-    // const EEntryFee: u64 = 0;
-    // // Match is in progress
-    // const EMatchInProgress: u64 = 1;
-
-    // const EGameInProgress: u64 = 0;
-    // const EGameAlreadyCompleted: u64 = 1;
-    // const EInvalidAmount: u64 = 2;
-    // const EGameMismatch: u64 = 3;
-    // const ENotWinner: u64 = 4;
-    // const ENoParticipants: u64 = 5;
+    use sui::transfer;
 
     // ====== General Structs ======
-    public struct GameMatch has key, store {
-        id: UID,
+    public struct GameMatch has store {
+        // id: ID,
+        id: u64,
         maker: address,
         taker: Option<address>,
+        maker_score: u64,
+        taker_score: u64,
+        maker_start: u64,
+        maker_end: u64,
+        taker_start: u64,
+        taker_end: u64,
         status: MatchStatus,
+        winner: address,
         prize: Balance<SUI>
     }
 
     /// A dummy NFT to represent the flashloan functionality
-    public struct NFT has key{
+    public struct NFT has key, store {
         id: UID,
-        match_id: ID,
+        match_id: u64,
         // entry_fee: Balance<SUI>,
         entry_fee: u64
     }
@@ -42,7 +39,11 @@ module match_game::match_game {
     // We can also call this an "order book"
     public struct PVPMatchPool has key, store {
         id: UID,
-        matches: vector<GameMatch>
+        // matches: vector<GameMatch> // OLD
+        // vector<UID> where we have all matches that are in the "OPEN" state
+        open_matches: vector<u64>,
+        // Table<K, V> where K is ID from match type and V is the GameMarch object
+        all_matches: Table<u64, GameMatch>
         // IRVIN: Ask about what data structure to use
     }
 
@@ -80,7 +81,7 @@ module match_game::match_game {
     // Event marking a match created. 
     // The "maker" is the player that "created" this match.
     public struct MatchCreatedEvent has copy, drop {
-        match_id: ID,
+        match_id: u64,
         maker: address,
         timestamp_ms: u64
     }
@@ -90,10 +91,12 @@ module match_game::match_game {
     // Initialized called only once on module publish
     fun init(ctx: &mut TxContext) {
         let id = object::new(ctx);
-        let matches = vector::empty<GameMatch>();
+        let open_matches = vector::empty<u64>();
+        let all_matches:  Table<u64, GameMatch> = table::new(ctx);
         let matchPool = PVPMatchPool {
             id,
-            matches
+            open_matches,
+            all_matches
         };
 
         transfer::transfer(
@@ -119,57 +122,82 @@ module match_game::match_game {
         r: &Random,
         clock: &Clock,
         ctx: &mut TxContext
-    ) : NFT {
+    ) {
         // STEP 1: If there's a list of "OPEN" matches, match with a "random" one
-        if (vector::length(&match_pool.matches) > 0) {
+        if (vector::length(&match_pool.open_matches) > 0) {
             // STEP 2: Join random match
-            join_match(entry_fee, match_pool, r, ctx)
+            join_match(entry_fee, match_pool, r, clock, ctx);
         }
         else {
             // STEP 2: Create match
-            // IRVIN: Ask about how to call function internally
-            create_match(entry_fee, match_pool, clock, ctx)
+            create_match(entry_fee, match_pool, clock, ctx);
         }
     }
 
     // Create a match.
     // From the game's perspective, the player creating the match is called
     // a "Maker".
+    // This simple creates the match object. 
+    // The match score for each player will be updated afterwards
     fun create_match(
         entry_fee: Coin<SUI>,
         match_pool: &mut PVPMatchPool,
         clock: &Clock,
         ctx: &mut TxContext
-    ) : NFT {
+    ) { 
         let maker = tx_context::sender(ctx);
-        let id = object::new(ctx);
+        // let id = object::new(ctx);
         let entry_fee_val = entry_fee.value();
+
         let gameMatch: GameMatch = GameMatch {
-            id: id,
+            id: generate_random_id(clock),
             maker: maker,
-            taker: option::some(tx_context::sender(ctx)), // TODO: Fix this
+            taker: option::some(@0x0), // Create empty address
+            maker_score: 0,
+            taker_score: 0,
+            maker_start: 0,
+            maker_end: 0,
+            taker_start: 0,
+            taker_end: 0,
             status: MatchStatus::OPEN,
+            winner: @0x0,
             prize: coin::into_balance(entry_fee)
         };
 
         let timestamp_ms = clock.timestamp_ms();
         let matchCreatedEvent = MatchCreatedEvent {
-            match_id: gameMatch.id.uid_to_inner(),
+            // match_id: gameMatch.id.uid_to_inner(),
+            match_id: gameMatch.id,
             maker,
             timestamp_ms,
         };
 
-        // Issue NFT that represent
+        // match_pool.open_matches.push_back(gameMatch.id.to_inner());
+        match_pool.open_matches.push_back(gameMatch.id);
+        
+        event::emit(matchCreatedEvent);
         let nft = NFT {
             id: object::new(ctx),
-            match_id: gameMatch.id.uid_to_inner(),
-            // entry_fee: coin::into_balance(entry_fee)
+            // match_id: gameMatch.id.uid_to_inner(),
+            match_id: gameMatch.id,
             entry_fee: entry_fee_val
         };
 
-        match_pool.matches.push_back(gameMatch);
-        event::emit(matchCreatedEvent);
-        nft
+        transfer::public_transfer(nft, tx_context::sender(ctx));
+        
+        table::add(
+            &mut match_pool.all_matches, 
+            gameMatch.id, 
+            gameMatch
+        );
+    }
+
+    fun generate_random_id(clock: &Clock): u64 {
+        // let timestamp = clock::timestamp_ms(clock);
+        let timestamp = clock.timestamp_ms();
+        let random_value = timestamp % 3;
+        // debug::print(&random_value);
+        random_value
     }
 
     // Join a random match
@@ -177,46 +205,79 @@ module match_game::match_game {
         entry_fee: Coin<SUI>,
         match_pool: &mut PVPMatchPool,
         r: &Random,
+        clock: &Clock,
         ctx: &mut TxContext
-    ) : NFT {
+    ) {
         // assert!(entry_fee <= balance::value(&pool.amount), ELoanAmountExceedPool);
 
         let player = tx_context::sender(ctx);
-        let matches_len = vector::length(&match_pool.matches);
+        let matches_len = vector::length(&match_pool.open_matches);
         let entry_fee_val = entry_fee.value();
 
         if(matches_len == 1) {
-            let matchPaired = &mut match_pool.matches[0];
-            matchPaired.taker = option::some(player);
-            matchPaired.status = MatchStatus::IN_PROGRESS;
-            // matchPaired.prize = coin::into_balance(entry_fee);
-            matchPaired.prize.join(entry_fee.into_balance());
+            let match_id_selected = match_pool.open_matches[0]; // Get ID of match
+            let match_selected = match_pool.all_matches.borrow_mut(match_id_selected);
+            match_selected.taker = option::some(player);
+            match_selected.status = MatchStatus::IN_PROGRESS;
+            match_selected.prize.join(entry_fee.into_balance());
+            match_selected.taker_start = clock.timestamp_ms();
 
-            NFT {
+            // NFT {
+            //     id: object::new(ctx),
+            //     match_id: match_selected.id.uid_to_inner(),
+            //     entry_fee: entry_fee_val
+            // }
+            let nft = NFT {
                 id: object::new(ctx),
-                match_id: matchPaired.id.uid_to_inner(),
-                // entry_fee: coin::into_balance(entry_fee)
+                // match_id: gameMatch.id.uid_to_inner(),
+                match_id: match_selected.id,
                 entry_fee: entry_fee_val
-            }
+            };
+
+            transfer::public_transfer(nft, tx_context::sender(ctx));
         }
         else
         {
             let mut generator = r.new_generator(ctx);
             let rand_index = generator.generate_u64_in_range(0, matches_len);
-            let matchPaired = match_pool.matches.borrow_mut(rand_index);
-            matchPaired.taker = option::some(tx_context::sender(ctx));
-            matchPaired.status = MatchStatus::IN_PROGRESS;
+            // let matchPaired = match_pool.open_matches.borrow_mut(rand_index);
+            let match_id_selected = match_pool.open_matches[0]; // Get ID of match
+            let match_selected = match_pool.all_matches.borrow_mut(match_id_selected);
+            match_selected.taker = option::some(tx_context::sender(ctx));
+            match_selected.status = MatchStatus::IN_PROGRESS;
 
-            balance::join(&mut matchPaired.prize, coin::into_balance(entry_fee));
+            balance::join(&mut match_selected.prize, coin::into_balance(entry_fee));
 
-            NFT {
+            // NFT {
+            //     id: object::new(ctx),
+            //     match_id: match_selected.id.uid_to_inner(),
+            //     entry_fee: entry_fee_val
+            // }
+            let nft = NFT {
                 id: object::new(ctx),
-                match_id: matchPaired.id.uid_to_inner(),
-                // entry_fee: coin::into_balance(entry_fee)
+                // match_id: gameMatch.id.uid_to_inner(),
+                match_id: match_selected.id,
                 entry_fee: entry_fee_val
-            }
+            };
+
+            transfer::public_transfer(nft, tx_context::sender(ctx));
         }
     }
+
+    // fun increase_moves(
+    //     entry_fee: Coin<SUI>,
+    //     match_pool: &mut PVPMatchPool,
+    //     match_id: u64
+    // ) {
+
+    // }
+
+    // public fun submit_score(
+    //     gameMatch: &mut GameMatch,
+    //     ctx: &mut TxContext
+    // ) {
+
+    // }
 
     // public fun submit_match_result(
     //     gameMatch: &mut GameMatch,
