@@ -8,21 +8,27 @@ module match_game::match_game {
     use sui::event;
     use sui::transfer;
 
+    // ====== Invalid ======
+    const EInvalidState: u64 = 1;
+
     // ====== General Structs ======
     public struct GameMatch has store {
         // id: ID,
         id: u64,
         maker: address,
-        taker: Option<address>,
+        taker: address,
         maker_score: u64,
         taker_score: u64,
         maker_start: u64,
         maker_end: u64,
         taker_start: u64,
         taker_end: u64,
+        maker_lives: u64,
+        taker_lives: u64,
         status: MatchStatus,
         winner: address,
-        prize: Balance<SUI>
+        prize: Balance<SUI>,
+        treasury: Balance<SUI>
     }
 
     /// A dummy NFT to represent the flashloan functionality
@@ -39,12 +45,9 @@ module match_game::match_game {
     // We can also call this an "order book"
     public struct PVPMatchPool has key, store {
         id: UID,
-        // matches: vector<GameMatch> // OLD
-        // vector<UID> where we have all matches that are in the "OPEN" state
+        owner: address,
         open_matches: vector<u64>,
-        // Table<K, V> where K is ID from match type and V is the GameMarch object
         all_matches: Table<u64, GameMatch>
-        // IRVIN: Ask about what data structure to use
     }
 
     // === Tournament Structs ===
@@ -62,6 +65,8 @@ module match_game::match_game {
     public enum MatchStatus has store, copy, drop {
         OPEN, // Available (waiting for a Taker)
         IN_PROGRESS, // Matched (while Taker plays).
+        MAKER_SCORE_SUBMITTED,
+        TAKER_SCORE_SUBMITTED,
         RESOLVED, // Scores have been resolved, both scores are in and winner determined.
         SETTLED, // Winner has claimed prize. Prize settled.
         EXPIRED, // Edge Case -- we set a limit to the match being opend
@@ -93,8 +98,11 @@ module match_game::match_game {
         let id = object::new(ctx);
         let open_matches = vector::empty<u64>();
         let all_matches:  Table<u64, GameMatch> = table::new(ctx);
+        let owner = ctx.sender();
+
         let matchPool = PVPMatchPool {
             id,
+            owner,
             open_matches,
             all_matches
         };
@@ -152,27 +160,28 @@ module match_game::match_game {
         let gameMatch: GameMatch = GameMatch {
             id: generate_random_id(clock),
             maker: maker,
-            taker: option::some(@0x0), // Create empty address
+            taker: @0x0, // Create empty address
             maker_score: 0,
             taker_score: 0,
             maker_start: 0,
             maker_end: 0,
             taker_start: 0,
             taker_end: 0,
+            maker_lives: 2,
+            taker_lives: 2,
             status: MatchStatus::OPEN,
             winner: @0x0,
-            prize: coin::into_balance(entry_fee)
+            prize: coin::into_balance(entry_fee),
+            treasury: balance::zero()
         };
 
         let timestamp_ms = clock.timestamp_ms();
         let matchCreatedEvent = MatchCreatedEvent {
-            // match_id: gameMatch.id.uid_to_inner(),
             match_id: gameMatch.id,
             maker,
             timestamp_ms,
         };
 
-        // match_pool.open_matches.push_back(gameMatch.id.to_inner());
         match_pool.open_matches.push_back(gameMatch.id);
         
         event::emit(matchCreatedEvent);
@@ -182,21 +191,19 @@ module match_game::match_game {
             match_id: gameMatch.id,
             entry_fee: entry_fee_val
         };
-
-        transfer::public_transfer(nft, tx_context::sender(ctx));
         
         table::add(
             &mut match_pool.all_matches, 
             gameMatch.id, 
             gameMatch
         );
+
+        transfer::public_transfer(nft, tx_context::sender(ctx))
     }
 
     fun generate_random_id(clock: &Clock): u64 {
-        // let timestamp = clock::timestamp_ms(clock);
         let timestamp = clock.timestamp_ms();
         let random_value = timestamp % 3;
-        // debug::print(&random_value);
         random_value
     }
 
@@ -217,7 +224,7 @@ module match_game::match_game {
         if(matches_len == 1) {
             let match_id_selected = match_pool.open_matches[0]; // Get ID of match
             let match_selected = match_pool.all_matches.borrow_mut(match_id_selected);
-            match_selected.taker = option::some(player);
+            match_selected.taker = player;
             match_selected.status = MatchStatus::IN_PROGRESS;
             match_selected.prize.join(entry_fee.into_balance());
             match_selected.taker_start = clock.timestamp_ms();
@@ -243,7 +250,7 @@ module match_game::match_game {
             // let matchPaired = match_pool.open_matches.borrow_mut(rand_index);
             let match_id_selected = match_pool.open_matches[0]; // Get ID of match
             let match_selected = match_pool.all_matches.borrow_mut(match_id_selected);
-            match_selected.taker = option::some(tx_context::sender(ctx));
+            match_selected.taker = tx_context::sender(ctx);
             match_selected.status = MatchStatus::IN_PROGRESS;
 
             balance::join(&mut match_selected.prize, coin::into_balance(entry_fee));
@@ -265,27 +272,140 @@ module match_game::match_game {
     }
 
     // fun increase_moves(
-    //     entry_fee: Coin<SUI>,
+    //     entry_ticket: &mut NFT,
+    //     fee: Coin<SUI>,
     //     match_pool: &mut PVPMatchPool,
-    //     match_id: u64
     // ) {
-
+    //     let match_id = entry_ticket.match_id;
+    //     let current_match = match_pool.all_matches.borrow_mut(match_id);
+    //         // current_match.taker = option::some(tx_context::sender(ctx));
+    //         // current_match.status = MatchStatus::IN_PROGRESS;
     // }
 
-    // public fun submit_score(
-    //     gameMatch: &mut GameMatch,
-    //     ctx: &mut TxContext
-    // ) {
+    // struct AdminCap
 
-    // }
+    public fun increase_lives(
+        entry_ticket: &mut NFT,
+        fee: Coin<SUI>,
+        match_pool: &mut PVPMatchPool,
+        ctx: &mut TxContext
+    ) {
+        let sender_address = tx_context::sender(ctx);
+        assert!(match_pool.owner == sender_address, 0);
 
-    // public fun submit_match_result(
-    //     gameMatch: &mut GameMatch,
-    //     match_pool: &mut PVPMatchPool,
-    //     ctx: &mut TxContext
-    // ) {
-    //     let matchPaired = mat
-    // }
+        let match_id = entry_ticket.match_id;
+        let current_match = match_pool.all_matches.borrow_mut(match_id);
+
+        if(sender_address == current_match.maker && current_match.maker_lives == 0){
+            current_match.maker_lives = current_match.maker_lives - 1;
+            current_match.treasury.join(fee.into_balance());
+        }
+        else if(sender_address == current_match.taker && current_match.maker_lives == 0) {
+            current_match.taker_lives = current_match.taker_lives - 1;
+            current_match.treasury.join(fee.into_balance());
+        }
+        else {
+            abort EInvalidState
+        }
+    }
+
+    public fun remove_lives(
+        entry_ticket: &mut NFT,
+        match_pool: &mut PVPMatchPool,
+        ctx: &mut TxContext
+    ) {
+        let sender_address = tx_context::sender(ctx);
+        assert!(match_pool.owner == sender_address, 0);
+
+        let match_id = entry_ticket.match_id;
+        let current_match = match_pool.all_matches.borrow_mut(match_id);
+
+        if(sender_address == current_match.maker && current_match.maker_lives > 0){
+            current_match.maker_lives = current_match.maker_lives - 1;
+        }
+        else if(sender_address == current_match.taker && current_match.maker_lives > 0) {
+            current_match.taker_lives = current_match.taker_lives - 1;
+        }
+        else {
+            abort EInvalidState
+        }
+    }
+
+    public fun submit_score(
+        final_score: u64,
+        entry_ticket: &mut NFT,
+        match_pool: &mut PVPMatchPool,
+        ctx: &mut TxContext
+    ) {
+        let sender_address = tx_context::sender(ctx);
+        assert!(match_pool.owner == sender_address, 0);
+
+        let match_id = entry_ticket.match_id;
+        let current_match = match_pool.all_matches.borrow_mut(match_id);
+
+        if(sender_address == current_match.maker){
+            current_match.maker_score = final_score;
+            current_match.status = MatchStatus::MAKER_SCORE_SUBMITTED;
+        }
+        else {
+            current_match.taker_score = final_score;
+            current_match.status = MatchStatus::TAKER_SCORE_SUBMITTED;
+        }
+    }
+
+    public fun resolve_match(
+        // entry_ticket: &mut NFT,
+        match_id: u64,
+        match_pool: &mut PVPMatchPool,
+        ctx: &mut TxContext
+    ) {
+        // let match_id = entry_ticket.match_id;
+        let current_match = match_pool.all_matches.borrow_mut(match_id);
+
+        if(current_match.status == MatchStatus::IN_PROGRESS 
+            && (current_match.maker_score != 0 && current_match.taker_score != 0)) {
+            if(current_match.maker_score > current_match.taker_score) {
+                current_match.winner = current_match.maker;
+                current_match.status = MatchStatus::RESOLVED;
+            }
+            else {
+                current_match.winner = current_match.taker;
+                current_match.status = MatchStatus::RESOLVED;
+            }
+        }
+    }
+
+    public fun settle_match(
+        entry_ticket: &mut NFT,
+        match_pool: &mut PVPMatchPool,
+        ctx: &mut TxContext
+    ) {
+        let match_id = entry_ticket.match_id;
+        let current_match = match_pool.all_matches.borrow_mut(match_id);
+
+        if(current_match.status == MatchStatus::RESOLVED 
+            && (current_match.maker_score != 0 && current_match.taker_score != 0)) {
+            if(current_match.maker_score > current_match.taker_score) {
+                current_match.winner = current_match.maker;
+                current_match.status = MatchStatus::SETTLED;
+
+                let prize_amount = current_match.prize.value();
+                transfer::public_transfer(
+                    current_match.prize.split(prize_amount).into_coin(ctx),
+                    ctx.sender(),
+                )
+            }
+            else {
+                current_match.winner = current_match.taker;
+                current_match.status = MatchStatus::SETTLED;
+                let prize_amount = current_match.prize.value();
+                transfer::public_transfer(
+                    current_match.prize.split(prize_amount).into_coin(ctx),
+                    ctx.sender(),
+                )
+            }
+        }
+    }
 
     // ====== Randomness ======
     // fun match_taker_maker(
@@ -311,10 +431,6 @@ module match_game::match_game {
     //     balance::join(&mut pool.amount, coin:into_balance(deposit));
     // }
 
-    // public fun claim_prize(match: &mut Match, ctx: &mut TxContext) {
-        // assert(match.status == MatchStatus.RESOLVED);
-    // }
-
     // public fun mint_nft(payment: Coin<SUI>, ctx: &mut TxContext): NFT {
 
     // }
@@ -323,11 +439,3 @@ module match_game::match_game {
     //     event::emit(VerifiedEvent {is_verified: ecvrf::ecvrf_verify(&output, &alpha_string, &public_key, &proof)});
     // }
 }
-
-// 1. public `create_match` 
-// 2. `stake_entry_fee`
-// 3. `deposit_to_pool`
-// 4. public `start_match` 
-// 5. public `end_match` 
-// 6. public `claim_prize`
-// 7. public `claim_entry_fee`
